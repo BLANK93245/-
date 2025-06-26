@@ -1,1 +1,350 @@
+# 大模型部署与微调
+
+可以想象一个预训练大模型（比如 GPT、LLaMA、BLOOM 等）是一个知识渊博的通才，它通过海量互联网文本学习了通用的语言模式、世界知识和基础技能。
+
++ 微调就是这个通才模型在特定任务或领域上进行的针对性再训练。
++ 操作上，就是拿一个已经预训练好的大模型作为基础，然后用相对较小规模的、特定任务（或领域）的数据集，在这个模型上继续训练或调整其（部分）参数。
++ 这个过程会调整模型的内部表示，使其输出更专注于目标任务的需求。
+
+简单比喻：
+
++ 预训练模型就像是一个刚从大学毕业的医科学生（有广泛的基础医学知识）。
++ 微调就像是让这个学生去某个专科医院（比如儿科）当规培医生，跟着有经验的医生学习处理具体的儿科病例。通过这种专门的实践训练，他就从一个泛泛的医生变成了一个更擅长儿科的医生。
+
+## 为什么需要微调？
+
+预训练大模型很强大，但直接用于特定任务往往不够理想。微调的必要性主要体现在以下几个方面：
+
+### 1. 提升特定任务稳定性
+
++ 通用大模型虽然啥都懂点，但在具体任务（如客服问答、法律文书生成、医疗报告摘要、特定领域知识问答）上表现可能不够精准或不符合要求。
++ 微调可以让模型专注于学习特定领域的术语、写作风格、偏好格式（如代码注释格式）以及关键知识，从而在该任务上达到更高的准确性、相关性和流畅度。
+
+### 2. ​适应特定的领域或垂直行业​​
+
++ 通用模型的知识在特定垂直领域（如金融、法律、生物医药、企业内部知识库）中可能不够深入、准确或时效性强。
++ 使用该领域的专有数据（行业报告、公司文档、专业术语库）微调后，模型能掌握更专业的知识和理解能力，提供更有价值的服务。
+
+### 3. 控制输出风格和语气
+
++ 用户可能需要模型输出特定风格的内容，例如正式、幽默、简洁、详细、专业、安全无害等。
++ 微调可以通过提供具有期望风格的样本数据，引导模型学习并模仿这种风格。例如，让客服机器人语气更亲切，让代码生成器注释更规范。
+
+### 4. ​利用小规模高质量数据
+
++ 获取和标注海量通用训练数据成本极高，但获取特定任务的高质量、小规模数据集相对可行（如企业内部数据）。
++ 微调允许用这些宝贵的小数据“点拨”大模型，高效地将其通用能力迁移到特定目标上，性价比很高。
+
+### 5. ​解决数据隐私或合规性问题​
+
++ 一些涉及敏感信息的应用（如医疗、金融），用户无法将数据发送到公有云模型处理。
++ 微调允许用户在本地或私有环境中，利用私有数据训练一个专属模型，既利用了基础模型的强大能力，又保障了数据安全合规。
+
+### 6. ​降低推理成本（间接）
+
++ 微调后的模型在特定任务上表现更好，意味着可能需要更少的Prompt工程或输入限制就能达到期望输出，或者减少需要生成后编辑的次数，间接提高了效率。更精准的模型有时能缩短对话轮次，也能节省资源。
++ 某些微调技术（如LoRA, QLoRA）主要调整一小部分额外参数，几乎不增加推理成本。
+
+#### 总结
+
+​微调是让强大的通用大模型变得更“专”、更“懂你”的关键步骤。​​ 它通过小规模针对性训练，撬动预训练模型的巨大潜力，使其成为更贴合特定业务需求、更精准、更可控、更高效的工具。没有微调，大模型很多时候只能是一个“万金油”，难以真正落地到千行百业的具体场景中发挥作用。
+
+## 微调技术，只讲LoRA
+
+LoRA 的英文全称是 ​Low-Rank Adaptation​（低秩适应），它是一种极其流行的参数高效微调技术。
+
+### 核心目标
+
+​解决大模型（尤其是像 GPT-3, LLaMA 这样的超大模型）全量微调的成本和资源难题。​​
+
++ ​全量微调需要更新模型的所有或大部分参数，这需要：
+    + 巨大的 GPU 显存（存储模型参数、优化器状态、梯度等）。
+    + 大量的计算资源。
+    + 非常耗时。
++ 对于很多研究人员、开发者或资源有限的公司来说，全量微调非常大的模型几乎是不现实的。
+
+### LoRA 的核心思想
+
+LoRA 采用了一个非常聪明的“迂回”策略：
+
+1. ​冻结预训练模型：​​ 保持预训练模型原始的巨大权重 $W$​ 完全不变！不更新它们，这样就避免了存储梯度和优化器状态带来的巨大开销。
+
+2. ​引入低秩矩阵对：​​ 在原始模型中的某些特定层（通常是注意力模块中的 `query`, `key`, `value` 和 `output` 投影层）旁边，并行地添加两个小型、低秩的矩阵，比如矩阵​$A$​和矩阵​$B$。
+    + $A$ 是一个向下投影的矩阵（形状：`原维度` $\times$ `低秩维度 r`）。
+    + ​$B$​ 是一个向上投影的矩阵（形状：`低秩维度 r` $\times$ `原维度`）。
+    + 关键点：​​ 这个`低秩维度 ​r​`非常小！通常远小于原始权重矩阵的维度（例如，r 可以是 8, 16, 64 等）。
+​
+3. 微调小矩阵：​​ 在微调过程中，​只训练（更新）新添加的这个小矩阵对 $(A,B)$​。
+    + 原始权重 $​W$​ 被冻结，不计算梯度，也不更新。
+    + 训练的开销和需要存储的优化器状态就仅仅来自于这些很小的矩阵 $A$ 和 $B$。
+
+4. ​模拟参数变化：​​ 在模型的前向传播计算中，对于原始权重矩阵 $​W$​ 的输出，会额外加上低秩矩阵对相乘的结果：
+
+    $$output = Wx + (B \times A)$$
+
+    这里 $(B\times A)$ 是一个与原矩阵 $W$​ 同维度的低秩矩阵，它试图捕捉模型在微调过程中为了适应新任务而应该发生的“参数变化量” $\Delta W​(\Delta W \approx B\times A)$ 。
+
+### 为什么叫“低秩”？
+
+因为 LoRA 试图用两个形状为 `(原始维度 * r)` 和 `(r * 原始维度)` 的小矩阵相乘 $(B \times A)$ 来近似表示原始大型参数矩阵 $W$​ 的更新 ​$ \Delta W $。这个乘积 $B \times A$ 的数学性质是秩不超过 ​r​（是一个低秩矩阵）。LoRA 基于一个假设​：在适应新任务时，模型所需的重要参数变化其实可以用一个低秩的矩阵来表示，而不需要改变所有高维参数。
+
+### LoRA 的主要优点
+
+1. ​显著减少显存占用：​​ 只需存储极少量额外参数 $(A and B)$ 的梯度、优化器状态。这使得在较小的 GPU（如单个消费级显卡）上微调超大模型成为可能（例如，用一张 24GB 显存的 V100/A10G/A100 微调 7B/13B 模型）。
+2. ​大幅降低计算开销：​​ 仅更新一小部分参数，计算量大大减少。
+3. ​训练更快：​​ 由于参数少、显存压力小，训练速度通常更快。
+4. 易于部署/切换任务：​​
+    + 多个微调任务可以共享同一个庞大的原始基础模型。
+    + 只需为每个任务存储一组独立的、微小的 $(A, B)$ 矩阵对。
+    + 执行特定任务时，只需加载对应的 $(A, B)$ 加到原始模型上即可。
+5. 无损合并：​​ 训练完成后，可以将 $(B \times A)$ 低秩矩阵加到原始的 ​$W$​ 上，得到一个合并后的“新”完整权重 ​$W^{\prime} = W + B \times A$。这样，合并后的模型就像一个标准的微调模型一样，在推理时没有任何额外开销（和原始模型的推理速度、显存占用一样）。
+6. ​效果好：​​ 在很多任务上，LoRA 可以达到接近全量微调的性能，性价比极高。
+
+### 简单总结
+
+LoRA 就是 ​给大模型做“微创手术”​。它不动模型本身庞大复杂的“主器官”（原始权重），而是在关键“部位”（某些层）旁边接上几个非常轻量的“辅助模块”（小矩阵 $\textbf{A}$ 和 $\textbf{B}$）。通过只训练更新这些小巧的辅助模块，就能让整个模型高效适配到新的任务或数据上。它完美解决了在大模型时代微调的资源瓶颈问题，是推动大模型落地的关键技术之一。
+
+## 工具准备
+
+1. 服务器，需要比较牛逼的显卡，最好是N卡
+2. Linux 系统
+3. 安装Anaconda
+4. CUDA
+5. Pytorch
+
+### Anaconda
+
+参考 [教程](https://blog.csdn.net/wyf2017/article/details/118676765)。
+
+Anaconda会给电脑预装一个python环境 Base ,不用自己额外再在系统里面装python，但我们一般不用 Base 环境，使用下面命令创建自己的环境：
+
+```bash
+conda create -n <需要创建的环境名字> python==<创建环境的python版本> -y
+```
+
+使用下面的命令启动环境：
+
+```bash
+conda activate <环境名称>
+```
+
+环境创建好之后，可以在用户个人的文件夹下面查看，路径 `~/.conda/envs/`。
+
+>**注意**：因为不同开发环境和部署环境（x86或者arm64），我们会安装不同版本的Anaconda，导致Anaconda下载源的python版本或者一些库的版本不一样，可以使用下面命令查看当前下载源支持哪些版本的库。
+
+```bash
+conda search <库的名字>
+```
+
+### CUDA
+
+参考[教程](https://blog.csdn.net/Sihang_Xie/article/details/127347139)
+
+>**注意**CUDA版本是本机驱动向下兼容，例如本机12.1，可以装11.8，但是装不了12.4。
+
+### Python装库
+
+我们现在有python自带的 pip 工具和 conda 工具，一般推荐使用pip，库比较多，比较新。
+
+安装命令`pip install <你的库名>`以及`conda install <你的库名>`。
+
+由于 pip 和 conda 的官方镜像都在国外，下载速度会比较慢，建议[配置国内镜像](https://www.runoob.com/w3cnote/pip-cn-mirror.html)
+
+如果需要对源码进行阅读和调整，可以在`/home/<user>/.conda/envs/<env>/lib/<python3.x>/site-packages/`下找到对应库的源码。
+
+### Pytorch
+
+从[Pytorch官网](https://pytorch.org/get-started/locally/)复制指令到命令行安装
+
+对于不同开发需求，有[历史版本](https://pytorch.org/get-started/previous-versions/)
+
+## 获取大模型
+
+一般我们从下面几个途径获取模型原始文件：
+
+1. [魔塔社区](https://www.modelscope.cn/models?page=1&tabKey=task), 阿里打造的国内社区，稳定连接，高速下载，也不需要下载密钥；有本地工具库用于模型部署，也支持在线部署。推荐没事可以来逛逛，能碰到很多比较有意思的开源模型。（推荐）
+2. [HuggingFace](https://huggingface.co/models)，大模型社区鼻祖，支持在线部署，模型相比魔塔会多一点，但是该平台经常抽风，连不上没办法下模型（想给抱抱脸一拳）。有些开源模型会在第一次运行时将模型下载到本地，如果使用的时huggingface的下载器会连不上，可以试试追溯一下源码，将下载器改成魔塔的。
+3. 问问 github ？
+
+## 获取数据
+
+一般我们从下面几个途径获取训练数据：
+
+1. [Kaggle](https://www.kaggle.com/), 你可以把 Kaggle 想象成一个 ​全球最大的数据科学和机器学习的“在线社区 + 竞技场 + 学习园地”, 有海量的数据集。
+2. [魔塔社区](https://www.modelscope.cn/models?page=1&tabKey=task)
+3. [HuggingFace](https://huggingface.co/models)
+4. 调用API生成你想要的数据。（恭喜你！你已经掌握蒸馏这项技术的70%了）
+5. 问问 github ?
+
+## 模型部署
+
+### 使用 vLLM
+
+首先创建并启动一个环境：
+```bash
+conda create <your env name> python==<3.9--3.12> -y && conda activate <your env name>
+```
+
+然后使用 pip 命令安装vLLM, 这里我使用的是清华源
+```bash
+pip install vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+然后你可以使用下面的代码快速加载和搭建模型
+```python
+from vllm import LLM, SamplingParams
+llm = LLM(model="facebook/opt-125m")
+```
+
+`LLM()`的`model`参数为模型的名字，名字可以自行去modelscope或者huggingface查看，例如`MiniMax/MiniMax-M1-80k`, `Qwen/Qwen3-32B`。如果你写的名字不是官网提供的，会报错。该参数也可以设置成包含模型文件的本地路径。
+>**注意：** 默认情况下，vLLM 从 HuggingFace 下载模型。如果您想使用 ModelScope 的模型，请在初始化引擎之前设置环境变量 VLLM_USE_MODELSCOPE=1。
+
+模型的默认下载地址为`~/.cache`，模型在运行时会去该文件夹下检查是否存在目标模型，如果没有就会开始联网下载。如果你不想让模型存在在这里，有很多方法修改下载路径。我一般直接将模型下载到本地然后修改`LLM()`的参数为模型所在文件夹。在命令行输入下面的命令可以下载模型到指定文件夹：
+```bash
+modelscope download --model Qwen/Qwen3-32B --local_dir=<home to your model>
+```
+更多下载命令可以在modelscope官网查看。
+
+下一部分定义了输入提示列表和文本生成的采样参数。采样温度设置为 0.8，核心采样概率设置为 0.95。
+
+```python
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",  
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+```
+接着使用下面的代码将输入送入模型并获取推理结果：
+
+```python
+outputs = llm.generate(prompts, sampling_params)
+
+
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+```
+
+跟更多细节可以参考[vLLM中文站](https://vllm.hyper.ai/docs/)
+
+### 使用modelscope
+
+下面代码给出了使用modelscope部署Qwen3的流程
+
+```python
+from modelscope import AutoModelForCausalLM, AutoTokenizer
+
+model_name = "Qwen/Qwen3-32B"
+
+# 设置分词器并加载模型
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype="auto",
+    device_map="auto"
+)
+
+# 准备模型输入
+prompt = "Give me a short introduction to large language model."
+messages = [
+    {"role": "user", "content": prompt}
+]
+text = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+    enable_thinking=True # 设置思考模式，默认为True
+)
+model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+# 输出结果
+generated_ids = model.generate(
+    **model_inputs,
+    max_new_tokens=32768
+) #生成输出向量
+output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist() # 截断结果 
+
+# 处理思考文本
+try:
+    # rindex finding 151668 (</think>)
+    index = len(output_ids) - output_ids[::-1].index(151668)
+except ValueError:
+    index = 0
+
+#输出结果解码
+thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+
+print("thinking content:", thinking_content)
+print("content:", content)
+```
+
+`tokenizer = AutoTokenizer.from_pretrained(model_name)`, 这句话用于初始化模型的分词器，分词器是模型非常关键的器件，用于控制输入的编码和解码。用户的输入 `prompt` 从输入到输出需要经过如下的流程：
+
+1. 使用标准格式初始化`message`，**不同模型因为功能不同，message的书写格式不一样，不建议混用，可以参考模型官网设置**：
+
+    ```python
+    # Qwen3强调生成能力，没有经过对话微调
+    messages = [
+        {"role": "user", "content": prompt} # 用户需求，随便写
+    ]
+    ```
+
+    ```python
+    # Qwen2.5-instruct是专门为对话服务的模型
+    messages = [
+        {"role": "system", "content": system_prompt}, # 用于设定一些背景，给大模型建立人设
+        {"role": "user", "content": prompt}
+    ]
+    ```
+
+    ```python
+    # Qwen2.5-VL-Instruct具备多模态理解能力
+    messages = [
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "image": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+            },
+            {"type": "text", "text": "Describe this image."},
+        ],
+    }
+    ]
+    ```
+
+2. `text = tokenizer.apply_chat_template()` 将`message`进一步模板化,添加例如句子开始符号`<|endoftext|>`，图片开始符号`<|im_start|>`等, 有些具备思考能力的模型会添加`<|think|>`标识符，这是因为该大模型在训练时就是使用的这些符号来辅助语义理解，这一步修改能提升模型性能。`tokenizer`在初始化时参考了模型文件夹下的`tokenizer.json` 和 `tokenizer_config.json`，**所以不同模型不建议混用**。
+
+3. `model_inputs = tokenizer([text], return_tensors="pt").to(model.device)`, 这一步是将模型输入分隔成token，并编码为数值, 在传入推理设备。`tokenizer`在初始化时参考了模型文件夹下的`tokenizer.json` 和 `tokenizer_config.json`，**所以不同模型不建议混用**。
+
+4. `tokenizer.decode()` 用查表的方式，参考`tokenizer.json` 和 `tokenizer_config.json`对输出结果进行解码，**所以不同模型不建议混用**。
+
+更多具体用法可以参考[Modelscope官方文档](https://www.modelscope.cn/docs/home)。HuggingFace的使用方法也类似，[HuggingFace官方文档](https://huggingface.co/docs)
+
+## 模型微调工具LLaMA-Factory
+
+[官方文档](https://github.com/hiyouga/LLaMA-Factory)，有中文版，写得非常详细，不再赘述，只说一些技巧以帮助大家获得比较好的微调结果。
+
+1. 对于32B左右的模型，使用10000条数据+3轮微调就能获得比较好的微调效果，不建议加太多数据，和太多轮次，会导致模型过拟合或者遗忘。
+2. 根据微调数据集输入的长度设置截断长度，官方默认2048，但很多时候没有必要开这么大，可以减少算力开销。
+3. 微调精度bf16,fp16,fp32在训练速度上大同小异，fp32微调出来的性能会好一点，但好得有限。
+4. 批处理大小可以根据算力资源调整，但不一定越大越好，也不一定越小越好，建议多试。
+5. 如果出现显存不够的情况可以考虑减小LoRA的秩。
+6. 可训练层数根据算力调整，一般微调个位数层足以有效。
+7. 遇到报错`ModuleNotFoundError: No module named 'llamafactory'`, 关闭webui, 在命令行输入：
+
+    ```bash
+    export PATH="/home/<user>/.conda/envs/<your env>/bin:$PATH"   
+    ```
+
+    再重启webui即可
+
+>注意：如果需要对模型进行微调，请务必参考项目中的data_preparation 将数据制作成标准格式的json
+
+>Tips: 推荐使用Swanlab工具远程监控微调进程并抓取Log
 # -
